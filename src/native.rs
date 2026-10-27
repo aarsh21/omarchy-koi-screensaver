@@ -19,13 +19,21 @@ pub struct Native {
 }
 
 impl Native {
-    pub fn new(width: u32, height: u32) -> Result<Self> {
-        sdl3::hint::set("SDL_APP_ID", "org.omarchy.screensaver");
+    pub fn new(width: u32, height: u32, monitor: Option<&str>) -> Result<Self> {
+        sdl3::hint::set("SDL_APP_ID", crate::SCREENSAVER_CLASS);
         sdl3::hint::set("SDL_VIDEO_DRIVER", "wayland");
+        sdl3::hint::set("SDL_VIDEO_ALLOW_SCREENSAVER", "1");
+        sdl3::hint::set("SDL_MOUSE_FOCUS_CLICKTHROUGH", "1");
+        if let Some(monitor) = monitor {
+            sdl3::hint::set("SDL_VIDEO_DISPLAY_PRIORITY", monitor);
+        }
         let sdl = sdl3::init()?;
         let video = sdl.video()?;
+        let display = video.get_primary_display()?;
+        let position = sdl3::sys::video::SDL_WINDOWPOS_CENTERED_DISPLAY(display.to_ll());
         let window = video
             .window("Koi pond", width, height)
+            .position(position, position)
             .high_pixel_density()
             .fullscreen()
             .build()?;
@@ -51,17 +59,21 @@ impl Native {
     }
 
     pub fn quit_requested(&mut self) -> bool {
-        self.events.poll_iter().any(|e| {
-            matches!(
+        self.events.poll_iter().any(|e| match e {
+            Event::Window {
+                win_event: WindowEvent::FocusLost,
+                ..
+            } => std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none(),
+            e => matches!(
                 e,
                 Event::Quit { .. }
                     | Event::KeyDown { .. }
                     | Event::MouseButtonDown { .. }
                     | Event::Window {
-                        win_event: WindowEvent::FocusLost | WindowEvent::CloseRequested,
+                        win_event: WindowEvent::CloseRequested,
                         ..
                     }
-            )
+            ),
         })
     }
 

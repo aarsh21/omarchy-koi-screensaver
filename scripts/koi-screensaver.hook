@@ -1,14 +1,20 @@
 #!/bin/bash
-# Omarchy runs this directory after a system update. A package upgrade reinstalls
-# /usr/share/omarchy/bin/omarchy-screensaver as a link to the stock ttfx screensaver, so put the
-# koi pond back and tell the user to re-run the screensaver if one is on screen.
+# Restore only session shims that an Omarchy update reset to their stock executables.
 set -e
 
 bin=/usr/local/bin/koi-screensaver
-shim=/usr/share/omarchy/bin/omarchy-screensaver
-
 [[ -x $bin ]] || exit 0
-[[ "$(readlink "$shim")" == "$bin" ]] && exit 0
+
+# Only a reset to Omarchy's stock target belongs to us. A later custom screensaver or a changed
+# integration layout is the user's choice, not an update we should undo.
+restore=()
+for name in omarchy-screensaver omarchy-launch-screensaver; do
+  shim=/usr/share/omarchy/bin/$name
+  if [[ -L $shim && "$(readlink -f "$shim")" == /usr/bin/"$name" ]]; then
+    restore+=("$shim")
+  fi
+done
+[[ ${#restore[@]} -gt 0 ]] || exit 0
 
 if ! sudo -n true 2>/dev/null; then
   omarchy-notification-send -u critical -g "󰈺" "Koi pond screensaver needs reinstalling" \
@@ -17,5 +23,7 @@ if ! sudo -n true 2>/dev/null; then
   exit 0
 fi
 
-sudo ln -sfn "$bin" "$shim"
+for shim in "${restore[@]}"; do
+  sudo ln -sfn "$bin" "$shim"
+done
 omarchy-notification-send -g "󰈺" "Koi pond screensaver restored after the Omarchy update"

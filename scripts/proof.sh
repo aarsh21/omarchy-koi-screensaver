@@ -4,43 +4,50 @@
 # Everything runs against the real compositor, the real launcher and a real terminal, and writes
 # screenshots, logs and state dumps into $KOI_PROOF_DIR (default
 # ~/.amp/in/artifacts/koi-proof). Run it from the repository root.
-set -uo pipefail
+set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${KOI_PROOF_DIR:-$HOME/.amp/in/artifacts/koi-proof}
 STOCK=/usr/bin/omarchy-screensaver
 INSTALLED=/usr/local/bin/omarchy-screensaver
 CLS=org.omarchy.screensaver
-# Exported, never passed as an argument: see the note above cls_windows.
 export C="$CLS"
 TRANSCRIPT="$OUT/transcript.log"
 
 SHELL_JSON="$HOME/.config/omarchy/shell.json"
-SHELL_JSON_BAK=/tmp/koi-shell.json.bak
-STAY_AWAKE_BAK=/tmp/koi-stay-awake.bak
+workdir=$(mktemp -d)
+SHELL_JSON_BAK="$workdir/shell.json"
 restored_stay_awake=0
+focus_target=$(hyprctl activewindow -j | jq -r '.address // empty')
+stock_hash=$(sha256sum "$STOCK" | cut -d' ' -f1)
 
 # The idle phase shortens the user's idle timeout and may release stay-awake for the test; put both
 # back even if the proof is interrupted.
 cleanup() {
   if [[ -f $SHELL_JSON_BAK ]]; then
-    cp "$SHELL_JSON_BAK" "$SHELL_JSON" && rm -f "$SHELL_JSON_BAK"
+    local tmp original
+    original=$(jq '.idle.screensaver' "$SHELL_JSON_BAK")
+    tmp=$(mktemp "$(dirname "$SHELL_JSON")/koi-proof.XXXXXX")
+    jq --argjson original "$original" '.idle.screensaver = $original' "$SHELL_JSON" >"$tmp" &&
+      mv "$tmp" "$SHELL_JSON"
   fi
   if [[ $restored_stay_awake == 1 ]]; then
     omarchy-toggle-idle stay-awake >/dev/null 2>&1 || true
     restored_stay_awake=0
   fi
+  rm -rf "$workdir"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 mkdir -p "$OUT"
 : >"$TRANSCRIPT"
 
 log() { printf '%s\n' "$*" | tee -a "$TRANSCRIPT"; }
 say() { printf '\n=== %s ===\n' "$*" | tee -a "$TRANSCRIPT"; }
+fail() { log "  FAIL: $*"; exit 1; }
 
-# The class name only ever travels in the environment: a process whose *argv* contains it makes
-# omarchy-launch-screensaver believe a screensaver is already running (it does `pgrep -f <class>`).
 cls_windows() {
   hyprctl clients -j | jq '[.[] | select(.class == env.C)] | length'
 }
@@ -49,13 +56,7 @@ no_window() { [[ $(cls_windows) -eq 0 ]]; }
 active_class() { hyprctl activewindow -j | jq -r '.class // ""'; }
 
 effect_pid() {
-  local pid
-  pid=$(hyprctl clients -j | jq -r '[.[] | select(.class==env.C)] | (map(select(.title=="Koi pond")) + .)[0].pid')
-  if [[ $(readlink "/proc/$pid/exe") == /usr/local/bin/koi-screensaver ]]; then
-    echo "$pid"
-  else
-    pgrep -P "$pid" | head -1
-  fi
+  hyprctl clients -j | jq -r '[.[] | select(.class==env.C and .title=="Koi pond")][0].pid'
 }
 
 wait_for() { # wait_for <seconds> <predicate>
@@ -117,7 +118,7 @@ if [[ "${KOI_SKIP_STOCK:-0}" != 1 ]]; then
     leave_screensaver
     sleep 1
   else
-    log "  !! stock screensaver window never appeared"
+    fail "stock screensaver window never appeared"
   fi
 fi
 
@@ -132,13 +133,13 @@ omarchy-launch-screensaver force >/dev/null 2>&1
 if wait_for 15 has_window; then
   log "  active window: $(hyprctl activewindow -j | jq -c '{class,title,fullscreen}')"
   sleep 2
-  log "  process tree:"
-  ps -eo pid,ppid,pcpu,etime,args |
-    grep -E 'foot --app-id=org\.omarchy\.screensave[r]|omarchy-screensave[r]$' |
-    grep -v 'proof.sh' | sed 's/^/    /' | tee -a "$TRANSCRIPT"
   koi_child=$(effect_pid)
+  log "  native process:"
+  ps -o pid,ppid,pcpu,etime,args -p "$koi_child" | sed 's/^/    /' | tee -a "$TRANSCRIPT"
+  [[ $(cls_windows) -eq $(hyprctl monitors -j | jq length) ]]
   log "  effect pid $koi_child"
   log "  child exe: $(readlink "/proc/$koi_child/exe")"
+  [[ $(readlink "/proc/$koi_child/exe") == /usr/local/bin/koi-screensaver ]]
   log "  shim: $(readlink /usr/share/omarchy/bin/omarchy-screensaver)"
   recorder=""
   if command -v gpu-screen-recorder >/dev/null; then
@@ -161,33 +162,39 @@ if wait_for 15 has_window; then
   sleep 1
   log "  after exit: windows=$(cls_windows) koi_processes=$(pgrep -x koi-screensaver | tr '\n' ' ')"
 else
-  log "  !! screensaver window never appeared"
+  fail "screensaver window never appeared"
 fi
 
 # ── 4. installed native renderer, including automatic feeding ─────────────────────────────────
 say "4. fps, native pixel size, and feeding from the installed binary"
 rm -f "$OUT/stats.jsonl"
-(KOI_SEED=42 KOI_STATS="$OUT/stats.jsonl" KOI_EXIT_AFTER=32 \
-  foot --app-id="$CLS" --config=/usr/share/omarchy/default/foot/screensaver.ini \
-  -e "$INSTALLED" >/dev/null 2>&1 </dev/null &)
-wait_for 8 has_window || log "  !! stats window never appeared"
+KOI_SEED=42 KOI_STATS="$OUT/stats.jsonl" KOI_EXIT_AFTER=32 \
+  omarchy-launch-screensaver force >/dev/null 2>&1
+wait_for 8 has_window || fail "stats window never appeared"
 sleep 24
 shot koi-feeding.png
 sleep 10
 log "  stats:"
 sed 's/^/    /' "$OUT/stats.jsonl" | tee -a "$TRANSCRIPT"
+jq -es 'length >= 5 and all(.[]; .backend == "wayland" and .fps > 0) and any(.[]; .pellets > 0)' "$OUT/stats.jsonl" >/dev/null ||
+  fail "native renderer statistics or automatic feeding missing"
 leave_screensaver || true
 sleep 1
 
 # ── 5. terminal restored on exit (real pty, no compositor involved) ──────────────────────────
 say "5. pty lifecycle: alt screen, raw mode and cursor restored"
-KOI_FOCUS_CLASS="" KOI_EXIT_AFTER=2 script -q -e -c "$INSTALLED --terminal" "$OUT/pty.log" >/dev/null 2>&1
+KOI_FOCUS_CLASS="" KOI_EXIT_AFTER=2 script -q -e -c \
+  'before=$(stty -g); /usr/local/bin/omarchy-screensaver --terminal; result=$?; test "$result" = 0 && test "$before" = "$(stty -g)"' \
+  "$OUT/pty.log" >/dev/null 2>&1
 log "  exit code:        $?"
 log "  enter alt screen: $(grep -c $'\x1b\[?1049h' "$OUT/pty.log")"
 log "  leave alt screen: $(grep -c $'\x1b\[?1049l' "$OUT/pty.log")"
 log "  cursor restored:  $(grep -c $'\x1b\[?25h' "$OUT/pty.log")"
 log "  background set:   $(grep -c $'\x1b]11;rgb' "$OUT/pty.log")"
 log "  bytes captured:   $(wc -c <"$OUT/pty.log")"
+for sequence in $'\x1b[?1049h' $'\x1b[?1049l' $'\x1b[?25h' $'\x1b]11;rgb'; do
+  grep -Fq "$sequence" "$OUT/pty.log"
+done
 
 # ── 6. leaves when its window loses focus (stock behaviour) ─────────────────────────────────
 say "6. focus loss closes the screensaver"
@@ -195,17 +202,18 @@ omarchy-launch-screensaver force >/dev/null 2>&1
 if wait_for 15 has_window; then
   sleep 2
   log "  before stealing focus: windows=$(cls_windows) active=$(active_class)"
-  hyprctl dispatch 'hl.dsp.focus({ window = "class:helium" })' >/dev/null 2>&1 || true
+  [[ -n $focus_target ]] || fail "start the proof with a normal application window focused"
+  hyprctl dispatch "hl.dsp.focus({ window = \"address:$focus_target\" })" >/dev/null 2>&1 ||
+    hyprctl dispatch focuswindow "address:$focus_target" >/dev/null
   sleep 0.5
   log "  after stealing focus:  active=$(active_class)"
   if wait_for 8 no_window; then
     log "  screensaver exited on its own"
   else
-    log "  !! screensaver stayed open after losing focus"
-    leave_screensaver || true
+    fail "screensaver stayed open after losing focus"
   fi
 else
-  log "  !! screensaver window never appeared"
+  fail "screensaver window never appeared"
 fi
 
 # ── 7. the real idle trigger ─────────────────────────────────────────────────────────────────
@@ -251,22 +259,22 @@ else
     log "  child exe: $(readlink "/proc/$koi_child/exe")"
     log "  idle service log:"
     journalctl --user -b -g "omarchy idle" --no-pager -n 8 | sed 's/^/    /' | tee -a "$TRANSCRIPT"
-    leave_screensaver || true
+    leave_screensaver
     sleep 1
   else
-    log "  !! the idle service never fired while someone kept using the machine"
+    fail "no idle launch observed; check input, inhibitors, and Omarchy's idle service"
   fi
 
-  cp "$SHELL_JSON_BAK" "$shell_json" && rm -f "$SHELL_JSON_BAK"
+  cleanup
   log "  idle.screensaver restored to $(jq -r '.idle.screensaver' "$shell_json")s"
-  if [[ $restored_stay_awake == 1 ]]; then
-    omarchy-toggle-idle stay-awake >/dev/null
-    log "  stay-awake restored: $(omarchy-toggle-idle status)"
-  fi
+  log "  stay-awake restored: $(omarchy-toggle-idle status)"
 fi
 
 # ── 8. control checks ───────────────────────────────────────────────────────────────────────
-say "7. control checks"
+say "8. control checks"
+[[ $(sha256sum "$STOCK" | cut -d' ' -f1) == "$stock_hash" ]]
+no_window
+if pgrep -x koi-screensaver >/dev/null; then fail "leftover koi processes"; fi
 log "  stock binary still present and unchanged: $(md5sum "$STOCK")"
 log "  installed binary:                         $(md5sum "$INSTALLED")"
 log "  idle timeout:                             $(jq -r '.idle.screensaver' "$HOME/.config/omarchy/shell.json") seconds"
@@ -275,8 +283,8 @@ if omarchy-toggle-enabled screensaver-off 2>/dev/null; then
 else
   log "  screensaver toggle:                       on"
 fi
-log "  leftover koi processes:                   $(pgrep -x koi-screensaver | wc -l)"
+log "  leftover koi processes:                   0"
 log "  leftover windows:                         $(cls_windows)"
 
-say "done"
+say "all requested phases passed (check explicit skips above)"
 log "artefacts in $OUT"

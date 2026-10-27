@@ -1,0 +1,27 @@
+--- a/Service.qml
++++ b/Service.qml
+@@ -269,7 +269,20 @@
+-  IdleMonitor {
++  // Quickshell 0.3.2 can retain a stale isIdle binding when a notifier is replaced at the same
++  // address. A fresh monitor object on enable/timeout changes avoids that dependency bug.
++  Loader {
+     id: idleMonitor
+-    enabled: root.idleEnabled && root.idleTimersEnabled
+-    timeout: Math.max(1, root.firstIdleTimeoutSeconds)
+-    respectInhibitors: true
++    active: root.idleEnabled && root.idleTimersEnabled
++    property real timeout: Math.max(1, root.firstIdleTimeoutSeconds)
++    readonly property bool isIdle: item ? item.isIdle : false
+     onIsIdleChanged: root.handleIdleChanged()
++    onTimeoutChanged: {
++      sourceComponent = null
++      sourceComponent = idleMonitorComponent
++    }
++    sourceComponent: Component {
++      id: idleMonitorComponent
++      IdleMonitor {
++        timeout: idleMonitor.timeout
++        respectInhibitors: true
++      }
++    }
+   }

@@ -1,7 +1,4 @@
-//! Omarchy screensaver: the koi pond from dao-ho's portfolio, drawn in a terminal.
-//!
-//! Runs fullscreen in whichever terminal Omarchy's screensaver launcher opened, and exits on a
-//! keypress, on a signal, or when its window is no longer focused.
+//! Rust koi pond with native Wayland presentation, an Omarchy launcher, and an ANSI fallback.
 
 use std::io::{self, IsTerminal, Read, Write};
 use std::process::{Command, Stdio};
@@ -16,6 +13,7 @@ mod native;
 
 const STEP: f64 = 1.0 / 60.0;
 const MAX_STEPS: usize = 4;
+const SCREENSAVER_CLASS: &str = "org.omarchy.screensaver";
 
 static QUIT: AtomicBool = AtomicBool::new(false);
 static WINCH: AtomicBool = AtomicBool::new(false);
@@ -32,6 +30,7 @@ struct WinSize {
 extern "C" {
     fn ioctl(fd: i32, request: u64, ...) -> i32;
     fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
+    fn kill(pid: i32, sig: i32) -> i32;
 }
 
 const TIOCGWINSZ: u64 = 0x5413;
@@ -138,41 +137,139 @@ struct WindowInfo {
     height: f64,
 }
 
-/// The focused window, from Hyprland: its class (so we can quit when focus moves) and its size in
-/// layout pixels, which together with the pty size gives the real shape of a terminal cell.
-fn window_info() -> Option<WindowInfo> {
+fn hyprland_query(query: &str) -> Option<serde_json::Value> {
     let out = Command::new("hyprctl")
-        .args(["activewindow", "-j"])
+        .args([query, "-j"])
         .stderr(Stdio::null())
         .output()
         .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
+    if !out.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&out.stdout).ok()
+}
 
-    let class_key = "\"class\":";
-    let start = text.find(class_key)? + class_key.len();
-    let rest = &text[start..];
-    let open = rest.find('"')? + 1;
-    let close = rest[open..].find('"')? + open;
-    let class = rest[open..close].to_string();
-
-    let size_key = "\"size\"";
-    let start = text.find(size_key)? + size_key.len();
-    let rest = &text[start..];
-    let open = rest.find('[')? + 1;
-    let close = rest[open..].find(']')? + open;
-    let parts: Vec<f64> = rest[open..close]
-        .split(',')
-        .filter_map(|p| p.trim().parse::<f64>().ok())
-        .collect();
-    let (width, height) = match parts.as_slice() {
-        [w, h] => (*w, *h),
-        _ => (0.0, 0.0),
-    };
+/// The focused window, from Hyprland: its class (so we can quit when focus moves) and its size in
+/// layout pixels, which together with the pty size gives the real shape of a terminal cell.
+fn window_info() -> Option<WindowInfo> {
+    let window = hyprland_query("activewindow")?;
     Some(WindowInfo {
-        class,
-        width,
-        height,
+        class: window["class"].as_str()?.to_string(),
+        width: window["size"][0].as_f64().unwrap_or(0.0),
+        height: window["size"][1].as_f64().unwrap_or(0.0),
     })
+}
+
+fn focused_monitor() -> Option<String> {
+    let monitors = hyprland_query("monitors")?;
+    let monitor = monitors.as_array()?.iter().find(|m| m["focused"] == true)?;
+    Some(monitor["name"].as_str()?.to_string())
+}
+
+/// One background supervisor owns one native child per output. Its lock prevents simultaneous
+/// manual/idle launches from duplicating windows, and it only ever signals children it spawned.
+fn launch_screensaver(force: bool, background: bool) -> io::Result<()> {
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        return Err(io::Error::other(
+            "the Omarchy launcher requires a Wayland session",
+        ));
+    }
+    if !force
+        && std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .is_some_and(|home| {
+                home.join(".local/state/omarchy/toggles/screensaver-off")
+                    .exists()
+            })
+    {
+        return Ok(());
+    }
+    let exe = std::env::current_exe()?;
+    if background {
+        let mut command = Command::new(exe);
+        command.arg("--screensaver");
+        if force {
+            command.arg("force");
+        }
+        command.stdin(Stdio::null()).stdout(Stdio::null()).spawn()?;
+        return Ok(());
+    }
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .ok_or_else(|| io::Error::other("XDG_RUNTIME_DIR is not set"))?;
+    let session = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
+        .map_err(|_| io::Error::other("the Omarchy launcher requires Hyprland"))?;
+    let lock = std::fs::File::create(
+        std::path::PathBuf::from(runtime).join(format!("koi-screensaver-{session}.lock")),
+    )?;
+    let waiting = Instant::now();
+    loop {
+        match lock.try_lock() {
+            Ok(()) => break,
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if hyprland_query("clients")
+                    .and_then(|v| v.as_array().cloned())
+                    .is_some_and(|windows| windows.iter().any(|w| w["class"] == SCREENSAVER_CLASS))
+                {
+                    return Ok(());
+                }
+                // The last surface can disappear before its supervisor releases the lock.
+                if waiting.elapsed() >= Duration::from_secs(2) {
+                    return Err(io::Error::other("previous screensaver is still stopping"));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error),
+        }
+    }
+    let clients = hyprland_query("clients")
+        .ok_or_else(|| io::Error::other("cannot query Hyprland clients"))?;
+    if clients
+        .as_array()
+        .is_some_and(|windows| windows.iter().any(|w| w["class"] == SCREENSAVER_CLASS))
+    {
+        return Ok(());
+    }
+    let monitors = hyprland_query("monitors")
+        .ok_or_else(|| io::Error::other("cannot query Hyprland outputs"))?;
+    let monitors = monitors
+        .as_array()
+        .filter(|outputs| !outputs.is_empty())
+        .ok_or_else(|| io::Error::other("no active Hyprland outputs"))?;
+    let mut children = Vec::new();
+    let result = (|| -> io::Result<()> {
+        for monitor in monitors {
+            let name = monitor["name"]
+                .as_str()
+                .ok_or_else(|| io::Error::other("output has no name"))?;
+            children.push(
+                Command::new(&exe)
+                    .env("KOI_MONITOR", name)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .spawn()?,
+            );
+        }
+        while !QUIT.load(Ordering::SeqCst) {
+            for child in &mut children {
+                if let Some(status) = child.try_wait()? {
+                    return if status.success() {
+                        Ok(())
+                    } else {
+                        Err(io::Error::other(format!("pond exited with {status}")))
+                    };
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Ok(())
+    })();
+    for mut child in children {
+        if matches!(child.try_wait(), Ok(None)) {
+            unsafe { kill(child.id() as i32, SIGTERM) };
+        }
+        let _ = child.wait();
+    }
+    result
 }
 
 fn iso_now() -> String {
@@ -230,7 +327,29 @@ fn apply_size(
 }
 
 fn main() {
+    unsafe {
+        signal(SIGWINCH, on_winch);
+        for sig in [SIGHUP, SIGINT, SIGQUIT, SIGTERM] {
+            signal(sig, on_quit);
+        }
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let launcher_alias = std::env::args()
+        .next()
+        .and_then(|arg| {
+            std::path::Path::new(&arg)
+                .file_name()
+                .map(|s| s == "omarchy-launch-screensaver")
+        })
+        .unwrap_or(false);
+    if launcher_alias || args.first().is_some_and(|a| a == "--screensaver") {
+        let force = args.iter().any(|a| a == "force");
+        if let Err(error) = launch_screensaver(force, launcher_alias) {
+            eprintln!("koi-screensaver: launcher: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Some(arg) = args.first() {
         match arg.as_str() {
             "--version" | "-V" => {
@@ -240,7 +359,8 @@ fn main() {
             "--help" | "-h" => {
                 println!(
                     "koi-screensaver {}\n\nThe koi pond screensaver for Omarchy. Press any key to leave.\n\n\
-                     Wayland uses native ASCII tiles; --terminal selects the ANSI fallback.\n\n\
+                     Wayland uses native ASCII tiles; --terminal selects the ANSI fallback.\n\
+                     --screensaver [force] supervises one native pond per Hyprland output.\n\n\
                      Environment: KOI_FPS, KOI_SIZE=COLSxROWS, KOI_FEED, KOI_FOCUS_CLASS,\n\
                      KOI_STATS=path, KOI_EXIT_AFTER=seconds, KOI_DUMP_FRAMES=path, KOI_DUMP_SECONDS",
                     env!("CARGO_PKG_VERSION")
@@ -270,7 +390,7 @@ fn main() {
     let exit_after = env_f64("KOI_EXIT_AFTER", 0.0);
     let feed_every = env_f64("KOI_FEED", 0.0);
     let focus_class =
-        std::env::var("KOI_FOCUS_CLASS").unwrap_or_else(|_| "org.omarchy.screensaver".to_string());
+        std::env::var("KOI_FOCUS_CLASS").unwrap_or_else(|_| SCREENSAVER_CLASS.to_string());
     let stats_path = std::env::var("KOI_STATS").unwrap_or_default();
     let seed = std::env::var("KOI_SEED")
         .ok()
@@ -283,19 +403,17 @@ fn main() {
         });
 
     let mut native = if use_native {
-        // Let the launcher's Foot host finish mapping before its child takes focus. Otherwise a
-        // late fullscreen transition in Foot can steal focus back and immediately dismiss the pond.
-        if std::io::stdout().is_terminal() {
-            settled_size();
-        }
         let info = window_info();
         let (w, h) = info
             .map(|i| (i.width as u32, i.height as u32))
             .unwrap_or((1280, 720));
-        Some(native::Native::new(w, h).unwrap_or_else(|e| {
-            eprintln!("koi-screensaver: native canvas: {e}");
-            std::process::exit(1);
-        }))
+        let monitor = std::env::var("KOI_MONITOR").ok().or_else(focused_monitor);
+        Some(
+            native::Native::new(w, h, monitor.as_deref()).unwrap_or_else(|e| {
+                eprintln!("koi-screensaver: native canvas: {e}");
+                std::process::exit(1);
+            }),
+        )
     } else {
         None
     };
@@ -345,13 +463,6 @@ fn main() {
     } else {
         None
     };
-
-    unsafe {
-        signal(SIGWINCH, on_winch);
-        for sig in [SIGHUP, SIGINT, SIGQUIT, SIGTERM] {
-            signal(sig, on_quit);
-        }
-    }
 
     // Any byte on stdin means "wake up".
     if native.is_none() {
@@ -454,13 +565,15 @@ fn main() {
             apply_size(&mut renderer, &mut terminal, &mut world, cols, rows);
         }
 
-        // The stock screensaver quits when its window stops being focused.
-        if native.is_none() && focus_checked.elapsed() >= Duration::from_secs(1) {
+        // Focus may move between ponds on different monitors without dismissing the session.
+        let focus_interval = if native.is_some() { 200 } else { 1000 };
+        if focus_checked.elapsed() >= Duration::from_millis(focus_interval) {
             focus_checked = Instant::now();
             if let Some(info) = window_info() {
                 // A cell is rarely 1:2: while the window and pty settle, keep measuring the real cell
                 // so the pond keeps the physical aspect ratio of the screen.
-                if now - started < Duration::from_secs(10)
+                if native.is_none()
+                    && now - started < Duration::from_secs(10)
                     && forced_aspect <= 0.0
                     && info.width > 1.0
                     && info.height > 1.0
