@@ -349,13 +349,14 @@ impl World {
         }
         let t = self.time;
         self.pellets.retain(|p| t - p.born < PELLET_LIFE);
-        for idx in 0..self.pellets.len() {
-            if !self.pellets[idx].landed {
-                if t - self.pellets[idx].born < self.pellets[idx].land_at {
+        let damp = (-dt * 0.2).exp();
+        for p in &mut self.pellets {
+            if !p.landed {
+                if t - p.born < p.land_at {
                     continue;
                 }
-                self.pellets[idx].landed = true;
-                let (px, py) = (self.pellets[idx].x, self.pellets[idx].y);
+                p.landed = true;
+                let (px, py) = (p.x, p.y);
                 self.ripples.push(Ripple {
                     x: px,
                     y: py,
@@ -370,13 +371,10 @@ impl World {
                 }
                 continue;
             }
-            let damp = (-dt * 0.2).exp();
-            let mut p = self.pellets[idx].clone();
             p.vx *= damp;
             p.vy *= damp;
             p.x += p.vx * dt;
             p.y += p.vy * dt;
-            self.pellets[idx] = p;
         }
         self.ripples.retain(|r| t - r.born < ripple_life(r));
         self.bites.retain(|b| t - b.born < BITE_LIFE);

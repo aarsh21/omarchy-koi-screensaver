@@ -1,6 +1,5 @@
-//! Terminal renderer for the koi pond. It keeps the original's rasterisation idea -- sample the
-//! koi outline per cell, then paint a skin "tile" behind a dense glyph -- but tiles are ANSI
-//! background colours and glyphs are terminal characters instead of canvas fillRect/fillText.
+//! Shared koi rasterizer: sample the outline per cell, then paint a skin tile behind a dense
+//! glyph. Native Wayland and ANSI presentation use the same glyphs and composed colours.
 
 use std::collections::HashMap;
 
@@ -98,12 +97,7 @@ fn ramp(stops: &[Rgb], t: f64) -> Rgb {
 
 /// Blend the packed `color` over `base` by `a`, returning packed 24-bit.
 fn blend(base: Rgb, color: u32, a: f64) -> u32 {
-    let k = clamp(a, 0.0, 1.0);
-    let c = unpack(color);
-    let r = base[0] as f64 + (c[0] as f64 - base[0] as f64) * k;
-    let g = base[1] as f64 + (c[1] as f64 - base[1] as f64) * k;
-    let b = base[2] as f64 + (c[2] as f64 - base[2] as f64) * k;
-    (((r as u32) & 255) << 16) | (((g as u32) & 255) << 8) | ((b as u32) & 255)
+    pack(mix(base, unpack(color), clamp(a, 0.0, 1.0)))
 }
 
 /// A line glyph that follows a direction in screen space, for fin rays and ripple rings.
@@ -404,16 +398,14 @@ impl PondRenderer {
         self.cell_shadow.fill(0);
 
         // Deeper koi first, so the ones near the surface glide over them.
-        let mut order: Vec<usize> = (0..world.koi.len()).collect();
+        let mut order: Vec<_> = world.koi.iter().collect();
         order.sort_by(|a, b| {
-            world.koi[*a]
-                .depth
-                .partial_cmp(&world.koi[*b].depth)
+            a.depth
+                .partial_cmp(&b.depth)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        for idx in order {
-            let koi = world.koi[idx].clone();
-            self.rasterize_koi(&koi, world.time);
+        for koi in order {
+            self.rasterize_koi(koi, world.time);
         }
         self.deposit_wake(world);
         self.diffuse(dt);
@@ -495,18 +487,15 @@ impl PondRenderer {
         } else {
             self.flare_right
         };
-        let mut hit = std::mem::take(&mut self.hit);
-        let inside = classify(
+        classify(
             best_s,
             a / l,
             past / l,
             flare,
-            &mut hit,
+            &mut self.hit,
             ahead / l,
             lateral / l,
-        );
-        self.hit = hit;
-        inside
+        )
     }
 
     /// Skin colour for a body point, from the koi's own markings pinned to body coordinates.

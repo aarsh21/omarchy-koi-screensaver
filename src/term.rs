@@ -4,19 +4,12 @@
 //! glyph). Consecutive changed cells are written as one run, so a moving body costs one cursor jump
 //! and a handful of SGR sequences rather than a full-screen repaint.
 
+use std::fmt::Write as _;
 use std::io::{self, Write};
 
 use crate::render::{pack, Frame, DARK};
 
 pub const DEFAULT_BG: u32 = pack(DARK.bg);
-
-fn sgr_fg(p: u32) -> String {
-    format!("\x1b[38;2;{};{};{}m", p >> 16, (p >> 8) & 255, p & 255)
-}
-
-fn sgr_bg(p: u32) -> String {
-    format!("\x1b[48;2;{};{};{}m", p >> 16, (p >> 8) & 255, p & 255)
-}
 
 const ENTER_ALT_SCREEN: &str = "\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l";
 const LEAVE_ALT_SCREEN: &str = "\x1b[0m\x1b[49m\x1b[?25h\x1b[?1049l";
@@ -102,8 +95,8 @@ impl Terminal {
         if full {
             out.push_str("\x1b[2J\x1b[H");
         }
-        let mut last_fg: i64 = -1;
-        let mut last_bg: i64 = i64::MAX;
+        let mut last_fg = None;
+        let mut last_bg = None;
         let mut painted = 0usize;
 
         for r in 0..frame.rows {
@@ -124,24 +117,36 @@ impl Terminal {
                     }
                     end += 1;
                 }
-                out.push_str(&format!("\x1b[{};{}H", r + 1, c + 1));
+                let _ = write!(out, "\x1b[{};{}H", r + 1, c + 1);
                 for k in c..end {
                     let j = row + k;
                     let bg = frame.bg[j];
-                    if bg as i64 != last_bg {
-                        out.push_str(&if bg == DEFAULT_BG {
-                            "\x1b[49m".to_string()
+                    if Some(bg) != last_bg {
+                        if bg == DEFAULT_BG {
+                            out.push_str("\x1b[49m");
                         } else {
-                            sgr_bg(bg)
-                        });
-                        last_bg = bg as i64;
+                            let _ = write!(
+                                out,
+                                "\x1b[48;2;{};{};{}m",
+                                bg >> 16,
+                                (bg >> 8) & 255,
+                                bg & 255
+                            );
+                        }
+                        last_bg = Some(bg);
                     }
                     let glyph = frame.glyph[j];
                     if glyph != b' ' {
                         let fg = frame.fg[j];
-                        if fg as i64 != last_fg {
-                            out.push_str(&sgr_fg(fg));
-                            last_fg = fg as i64;
+                        if Some(fg) != last_fg {
+                            let _ = write!(
+                                out,
+                                "\x1b[38;2;{};{};{}m",
+                                fg >> 16,
+                                (fg >> 8) & 255,
+                                fg & 255
+                            );
+                            last_fg = Some(fg);
                         }
                     }
                     out.push(glyph as char);
