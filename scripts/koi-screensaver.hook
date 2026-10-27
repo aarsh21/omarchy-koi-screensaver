@@ -12,7 +12,8 @@ shim=/usr/share/omarchy/bin/omarchy-screensaver
 
 if ! sudo -n true 2>/dev/null; then
   omarchy-notification-send -u critical -g "󰈺" "Koi pond screensaver needs reinstalling" \
-    "Run install.sh again to restore it after the Omarchy update." --exec "foot -e bash -c 'echo run install.sh; sleep 30'"
+    "Re-run the setup command from the project README to restore it after the Omarchy update." \
+    --exec "omarchy-launch-web https://github.com/aarsh21/omarchy-koi-screensaver#install-and-launch"
   exit 0
 fi
 

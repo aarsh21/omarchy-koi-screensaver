@@ -33,33 +33,62 @@ are omitted: this pond feeds itself and dismisses when you interact with it.
 
 ## Requirements
 
-- Linux with an Omarchy/Hyprland Wayland session for the supported desktop integration.
-- A current stable Rust toolchain, Cargo, and a C build toolchain.
-- SDL3, Cairo, and `pkg-config` development files (`sdl3`, `cairo`, and `pkgconf` on Arch).
+- An Omarchy/Hyprland Wayland session, internet access, `curl`, and `tar`.
 - Omarchy's existing terminal/screensaver setup; the tested terminal is Foot.
 - `sudo` access for installation into `/usr/local` and the Omarchy session shim.
 
-On Arch/Omarchy, install missing native build dependencies with:
+The installer checks for Rust, a C build toolchain, SDL3, Cairo, and `pkg-config`, and installs
+missing Arch packages with `pacman -S --needed --noconfirm`. If rustup is already installed but
+has no working toolchain, it installs stable Rust for this build without changing your chosen
+default toolchain. Package installation may ask for your sudo password.
 
-```bash
-sudo pacman -S --needed base-devel sdl3 cairo pkgconf
-```
-
-Install Rust separately if `cargo --version` is unavailable. If Rust was installed with rustup,
-ensure `~/.cargo/bin` is on `PATH`.
+The supported layout has `/usr/share/omarchy/bin/omarchy-screensaver` as a symlink and the stock
+executable at `/usr/bin/omarchy-screensaver`, as tested on Omarchy 4.0.6. Legacy layouts are refused
+rather than overwritten. Monitor dimensions and scaling are detected at runtime, not copied from
+the development machine.
 
 ## Install and launch
+
+Run this as your **normal desktop user, without sudo**:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/aarsh21/omarchy-koi-screensaver/main/setup.sh | bash
+```
+
+This downloads the latest source to a temporary directory, installs missing build dependencies,
+builds the Rust release binary locally, installs the Omarchy integration, and removes the temporary
+source afterward. Building can take several minutes. No GitHub login, Git checkout, or prebuilt
+binary is required. Your fonts, idle/lock settings, and stock screensaver executable are untouched.
+It does not start the screensaver or enable idle timers automatically.
+
+Then preview it:
+
+```bash
+omarchy-launch-screensaver force
+```
+
+Press **any key** or click to leave the native pond. Moving the pointer alone does not dismiss it.
+Automatic idle triggering still depends on your Omarchy session; see [Known limitations](#known-limitations).
+
+As with any `curl | bash` installer, inspect [setup.sh](setup.sh) and [install.sh](install.sh) before
+running code from the internet. To download and review it first instead:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/aarsh21/omarchy-koi-screensaver/main/setup.sh -o koi-setup.sh
+less koi-setup.sh
+bash koi-setup.sh
+```
+
+### Install from a clone
 
 ```bash
 git clone https://github.com/aarsh21/omarchy-koi-screensaver.git
 cd omarchy-koi-screensaver
 ./install.sh install
-omarchy-launch-screensaver force
 ```
 
-The repository is currently private, so cloning requires an authorized GitHub account.
-The installer builds a release binary locally; no prebuilt download is required.
-Press **any key** or click to leave the native pond. Moving the pointer alone does not dismiss it.
+Both installation methods use the same dependency checks and integration script. An existing
+unrelated login-shell screensaver at `/usr/local/bin/omarchy-screensaver` is not overwritten.
 
 ### Try it without installing
 
@@ -82,22 +111,31 @@ a tested cross-platform screensaver package.
 
 ### Update or uninstall
 
-To rebuild after pulling changes:
+To update, rerun the same `curl ... | bash` installation command. If you installed from a clone,
+you can instead rebuild after pulling changes:
 
 ```bash
 git pull --ff-only
 ./install.sh install
 ```
 
-To remove the integration:
+To remove the integration **without internet access or a source checkout**:
 
 ```bash
-./install.sh uninstall
+bash /usr/local/lib/koi-screensaver/install.sh uninstall
 ```
 
-Uninstall restores the previously recorded session shim target (normally Omarchy's stock
-screensaver), removes the installed koi binary and login-shell shim, and removes the post-update
-hook. It leaves your source checkout intact.
+From a clone, `./install.sh uninstall` works too. The online alternative is:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/aarsh21/omarchy-koi-screensaver/main/setup.sh | bash -s -- uninstall
+```
+
+Uninstall restores the original session shim target (normally Omarchy's stock screensaver) and
+removes the koi binary, its login-shell shim, saved installer, and post-update hook. Reinstalling
+preserves the original backup. If you switch to another screensaver after installing koi,
+uninstall leaves that replacement shim alone. A failed download or build does not replace an
+already installed screensaver. Source checkouts and installed build dependencies are retained.
 
 ## How the Omarchy integration works
 
@@ -114,6 +152,7 @@ The installer changes only the following integration paths:
 | `/usr/local/bin/omarchy-screensaver` | Symlink for login-shell command resolution |
 | `/usr/share/omarchy/bin/omarchy-screensaver` | Session shim redirected to the koi executable |
 | `/usr/local/lib/koi-screensaver/stock-shim-target` | Original session shim target for uninstall |
+| `/usr/local/lib/koi-screensaver/install.sh` | Saved installer for offline removal |
 | `~/.config/omarchy/hooks/post-update.d/koi-screensaver.hook` | Restores the koi shim after Omarchy updates |
 
 The hook uses noninteractive sudo if available; otherwise it notifies you to reinstall manually.
@@ -185,6 +224,18 @@ tiles and fin veils, pure-black water, ANSI diff output, a frame-time budget, an
 original shape classifier. The shape fixture contains **5,166 samples** generated from the
 portfolio's TypeScript implementation; tests also check the JavaScript-compatible texture hash.
 
+Eight additional installer tests run on Omarchy with Python and Bubblewrap:
+
+```bash
+python3 -m unittest discover -s tests -p test_setup.py -v
+```
+
+These stream the real setup script into Bash in network-isolated sandboxes with the host filesystem
+read-only. They cover install/reinstall, offline removal, download/build failures, dependency
+selection, rustup, foreign shim protection, and the post-update hook. Package installation,
+compilation, and HTTP are simulated; extraction and filesystem operations are real. Neither Python
+nor Bubblewrap is required by the installer itself.
+
 TypeScript/Bun are only needed to regenerate that fixture, not to build, test, or run Rust:
 
 ```bash
@@ -244,6 +295,6 @@ This project is a derivative Rust port with Omarchy integration, native Wayland 
 automatic feeding, and a black background. It is not an official Omarchy or Dao Ho project.
 
 No license file or GitHub-recognized license was found in the upstream repository when preparing
-this repository. **No open-source license is granted here for the upstream-derived code.** Keep
-the repository private until the relevant permission or licensing terms have been established;
-public availability of the original source alone is not permission to redistribute it under a new license.
+this repository. **No open-source license is granted here for the upstream-derived code.** Public
+availability of this port does not supply missing upstream permissions or authorize relicensing.
+Check the upstream terms or obtain permission before redistributing or relicensing the derived code.
