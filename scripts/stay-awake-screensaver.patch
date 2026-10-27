@@ -1,0 +1,32 @@
+--- a/Service.qml
++++ b/Service.qml
+@@ -25,2 +25,2 @@
+-  readonly property bool idleTimersEnabled: screensaverEnabled || lockEnabled
+-  readonly property int firstIdleTimeoutSeconds: IdleModel.firstIdleTimeout(screensaverTimeoutSeconds, lockTimeoutSeconds)
++  readonly property bool idleTimersEnabled: (stayAwakeStateLoaded && screensaverEnabled) || (idleEnabled && lockEnabled)
++  readonly property int firstIdleTimeoutSeconds: IdleModel.firstIdleTimeout(screensaverTimeoutSeconds, idleEnabled ? lockTimeoutSeconds : 0)
+@@ -107 +107 @@
+-    if (root.lockEnabled) {
++    if (root.idleEnabled && root.lockEnabled) {
+@@ -148 +148 @@
+-    if (!root.idleEnabled || !root.idledThisCycle || !root.screensaverStartedThisCycle) return
++    if (!root.idledThisCycle || !root.screensaverStartedThisCycle) return
+@@ -190 +190 @@
+-    if (!root.idleEnabled || !root.idleTimersEnabled) return
++    if (!root.idleTimersEnabled) return
+@@ -256,2 +256,7 @@
+-    if (enabled) cancelIdleCycle("stay-awake")
+-    else Qt.callLater(root.handleIdleChanged)
++    // Keep tracking any visible pond. Re-enabling locking gets a fresh full deadline.
++    lockTimer.stop()
++    if (!enabled && root.idledThisCycle && root.lockEnabled) {
++      lockTimer.interval = root.lockTimeoutSeconds * 1000
++      lockTimer.restart()
++    }
++    Qt.callLater(root.handleIdleChanged)
+@@ -273 +278 @@
+-    active: root.idleEnabled && root.idleTimersEnabled
++    active: root.idleTimersEnabled
+@@ -307 +312 @@
+-      if (root.idleEnabled && root.idledThisCycle && root.screensaverStartedThisCycle && root.screensaverWindowCount === 0 && !idleMonitor.isIdle) {
++      if (root.idledThisCycle && root.screensaverStartedThisCycle && root.screensaverWindowCount === 0 && !idleMonitor.isIdle) {

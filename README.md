@@ -74,9 +74,11 @@ omarchy-launch-screensaver force
 ```
 
 Press **any key** or click to leave the native pond. Moving the pointer alone does not dismiss it.
-For automatic launch, keep `idle.screensaver` positive and turn off **Stay Awake** if you want your
-configured idle screensaver and lock timers enabled (`omarchy-toggle-idle allow-idle`). Media
-inhibitors and ongoing input legitimately postpone idle. For the tested Quickshell bug, see the
+For automatic launch, keep `idle.screensaver` positive. By default Omarchy's **Stay Awake** disables
+both the screensaver and automatic lock; `omarchy-toggle-idle allow-idle` enables both timers.
+To keep Stay Awake on but still show fish, use the separate
+[screensaver-only policy](#optional-screensaver-while-stay-awake-is-on). Media inhibitors and ongoing
+input legitimately postpone idle. For the tested Quickshell bug, see the
 [idle workaround](#quickshell-idle-workaround).
 
 As with any `curl | bash` installer, inspect [setup.sh](setup.sh) and [install.sh](install.sh) before
@@ -211,6 +213,42 @@ omarchy-restart-shell
 An Omarchy update may replace the service; reassess whether the workaround is still needed.
 Normal koi uninstall does not revert this separately applied service patch. Continuous input,
 media inhibitors, and Stay Awake still prevent idle by design; this patch does not bypass them.
+
+### Optional: screensaver while Stay Awake is on
+
+[`scripts/stay-awake-screensaver.patch`](scripts/stay-awake-screensaver.patch) lets fish appear during
+inactivity **while Stay Awake keeps automatic locking off**. Apply it after the idle workaround
+above, from a clone while unlocked. It is tested on Omarchy 4.0.6 and is not applied by the installer.
+
+Inhibitors, key dismissal, and the `idle.screensaver = 0` disable setting still work. Turning Stay
+Awake off restores automatic locking with a fresh full lock timeout if a pond is already visible.
+Manual lock and suspend commands are unchanged.
+
+Check every hunk before applying and save a separate backup:
+
+```bash
+sudo patch --dry-run --forward --fuzz=0 \
+  /usr/share/omarchy/shell/plugins/services/idle/Service.qml < scripts/stay-awake-screensaver.patch &&
+sudo patch --forward --fuzz=0 --backup --suffix=.koi-stay-awake-backup \
+  /usr/share/omarchy/shell/plugins/services/idle/Service.qml < scripts/stay-awake-screensaver.patch &&
+omarchy-restart-shell
+```
+
+If the dry run fails, stop. To restore the original Stay Awake policy, reverse this patch **before**
+reversing the idle workaround:
+
+```bash
+sudo patch --reverse --fuzz=0 \
+  /usr/share/omarchy/shell/plugins/services/idle/Service.qml < scripts/stay-awake-screensaver.patch &&
+omarchy-restart-shell
+```
+
+Real-desktop checks covered automatic launch, lock suppression, toggling Stay Awake while a pond
+was visible, dismissal/reopening, and the timeout-zero control. Both the temporary 3-second and
+normal 150-second launch were verified; the 300-second lock setting was never shortened.
+
+This separate policy survives koi uninstall but may be replaced by Omarchy updates. The post-update
+hook does not manage it; check compatibility before reapplying.
 
 ## Rendering and code layout
 
