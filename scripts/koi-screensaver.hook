@@ -1,0 +1,20 @@
+#!/bin/bash
+# Omarchy runs this directory after a system update. A package upgrade reinstalls
+# /usr/share/omarchy/bin/omarchy-screensaver as a link to the stock ttfx screensaver, so put the
+# koi pond back and tell the user to re-run the screensaver if one is on screen.
+set -e
+
+bin=/usr/local/bin/koi-screensaver
+shim=/usr/share/omarchy/bin/omarchy-screensaver
+
+[[ -x $bin ]] || exit 0
+[[ "$(readlink "$shim")" == "$bin" ]] && exit 0
+
+if ! sudo -n true 2>/dev/null; then
+  omarchy-notification-send -u critical -g "󰈺" "Koi pond screensaver needs reinstalling" \
+    "Run install.sh again to restore it after the Omarchy update." --exec "foot -e bash -c 'echo run install.sh; sleep 30'"
+  exit 0
+fi
+
+sudo ln -sfn "$bin" "$shim"
+omarchy-notification-send -g "󰈺" "Koi pond screensaver restored after the Omarchy update"
